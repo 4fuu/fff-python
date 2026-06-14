@@ -11,6 +11,7 @@ dependencies = []
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "maturin>=1.0",
 ]
 
 [project.urls]
@@ -18,11 +19,13 @@ Repository = "https://github.com/dmtrKovalenko/fff.nvim"
 Issues = "https://github.com/dmtrKovalenko/fff.nvim/issues"
 
 [build-system]
-requires = ["uv_build>=0.11.14,<0.12"]
-build-backend = "uv_build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
-[tool.uv]
-package = true
+[tool.maturin]
+manifest-path = "../../crates/fff-python/Cargo.toml"
+module-name = "fff._fff_python"
+python-source = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

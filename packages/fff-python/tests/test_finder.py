@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -78,6 +79,6 @@ def test_multi_grep(sample_dir: str) -> None:
 def test_health_check(sample_dir: str) -> None:
     with FileFinder(sample_dir, watch=False, enable_content_indexing=False) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
-        health = finder.health_check()
+        health = json.loads(finder.health_check())
         assert "version" in health
         assert health["file_picker"]["initialized"] is True
