@@ -14,7 +14,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MACOSX_DEPLOYMENT_TARGET: "13"
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
 
 jobs:
   test:
