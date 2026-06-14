@@ -1,5 +1,5 @@
 [project]
-name = "fff"
+name = "fff-python"
 version = "0.1.0"
 description = "Python bindings for FFF (Fast File Finder)"
 readme = "README.md"
