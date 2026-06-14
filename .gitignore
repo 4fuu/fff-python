@@ -31,3 +31,34 @@ scripts/benchmark-results/
 
 # Test logs
 fff-test.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+build/
+*.whl
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+# uv
+# Testing / linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
