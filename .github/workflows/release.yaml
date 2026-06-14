@@ -405,8 +405,19 @@ jobs:
         if: contains(matrix.os, 'ubuntu')
         run: cargo install cargo-zigbuild
 
+      - name: Install aarch64 cross compiler
+        if: matrix.target == 'aarch64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --features zlob
