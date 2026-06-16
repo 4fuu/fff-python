@@ -853,7 +853,6 @@ impl FileFinder {
 
     #[pyo3(signature = (test_path=None))]
     fn health_check(&self, py: Python<'_>, test_path: Option<PathBuf>) -> PyResult<Py<PyDict>> {
-        let test_path = test_path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let picker = self.picker.clone();
         let frecency = self.frecency.clone();
         let query_tracker = self.query_tracker.clone();
@@ -870,18 +869,43 @@ impl FileFinder {
             frecency_initialized,
             query_tracker_initialized,
         ) = py.allow_threads(move || -> PyResult<_> {
+            // Resolve the path to inspect: explicit arg → indexed base path →
+            // process cwd. Report a cwd-resolution failure instead of silently
+            // discovering from an empty path.
+            let (test_path, cwd_error) = match test_path {
+                Some(p) => (Some(p), None),
+                None => {
+                    let base = picker
+                        .read()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|p| p.base_path().to_path_buf()));
+                    match base {
+                        Some(p) => (Some(p), None),
+                        None => match std::env::current_dir() {
+                            Ok(p) => (Some(p), None),
+                            Err(e) => (
+                                None,
+                                Some(format!("could not determine current directory: {}", e)),
+                            ),
+                        },
+                    }
+                }
+            };
+
             let git_version = git2::Version::get();
             let (major, minor, rev) = git_version.libgit2_version();
             let git_version = format!("{}.{}.{}", major, minor, rev);
-            let (repository_found, workdir, git_error) =
-                match git2::Repository::discover(&test_path) {
+            let (repository_found, workdir, git_error) = match test_path {
+                None => (false, None, cwd_error),
+                Some(test_path) => match git2::Repository::discover(&test_path) {
                     Ok(repo) => (
                         true,
                         repo.workdir().map(|p| p.to_string_lossy().to_string()),
                         None,
                     ),
                     Err(e) => (false, None, Some(e.message().to_string())),
-                };
+                },
+            };
 
             let (picker_initialized, picker_base_path, picker_is_scanning, picker_indexed_files) = {
                 let guard = picker.read().map_err(py_err)?;

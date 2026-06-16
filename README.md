@@ -698,6 +698,35 @@ with FileFinder("/path/to/project", watch=False) as finder:
     hits = finder.grep("class Profile", mode="plain", before_context=1, after_context=1)
 ```
 
+### Async usage
+
+`wait_for_scan` is a coroutine that polls scan status and yields to the event
+loop, so it never blocks other tasks. Use `wait_for_scan_blocking` from
+synchronous code.
+
+```python
+import asyncio
+from fff import FileFinder
+
+async def main():
+    with FileFinder("/path/to/project", watch=False) as finder:
+        await finder.wait_for_scan(timeout_ms=5000)
+        result = finder.search("main")
+        print(result)
+
+asyncio.run(main())
+```
+
+### What you get
+
+- `search`, `glob`, `directory_search`, `mixed_search` — frecency-ranked fuzzy file/dir search
+- `grep` / `multi_grep` — plain, regex, or fuzzy content search with context lines and cursor pagination
+- `track_query` / `get_historical_query` — optional frecency and query-history databases
+- `reindex`, `refresh_git_status`, `scan_progress`, `health_check` — lifecycle and diagnostics
+
+Typed result objects (`FileItem`, `Score`, `GrepMatch`, …) with `py.typed`
+stubs included. Ships as an `abi3` wheel compatible with Python 3.10+.
+
 Source: [`packages/fff-python/`](./packages/fff-python/).
 
 </details>

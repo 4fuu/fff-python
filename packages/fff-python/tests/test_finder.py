@@ -371,6 +371,14 @@ def test_reindex_and_health_check(sample_dir: str, tmp_path: Path) -> None:
         assert health["frecency"]["initialized"] is True
         assert health["query_tracker"]["initialized"] is True
 
+        # With no explicit path, the check inspects the indexed base path
+        # rather than the process cwd.
+        default_health = finder.health_check()
+        assert default_health["file_picker"]["base_path"] is not None
+        assert "error" not in default_health.get("git", {}) or default_health["git"][
+            "error"
+        ] != "could not determine current directory"
+
         finder.reindex(str(other))
         assert finder.wait_for_scan_blocking(timeout_ms=5000)
         result = finder.search("other")
