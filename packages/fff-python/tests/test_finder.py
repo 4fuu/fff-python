@@ -51,7 +51,15 @@ def test_imports_and_package_version() -> None:
     assert "GrepCursor" in fff.__all__
 
 
-def test_create_destroy_and_context_manager(sample_dir: str) -> None:
+def test_pathlib_base_path(sample_dir: str) -> None:
+    with FileFinder(Path(sample_dir), watch=False, enable_content_indexing=False) as finder:
+        assert finder.wait_for_scan(timeout_ms=5000)
+        assert finder.get_base_path() is not None
+        result = finder.search("main")
+        assert result.total_matched >= 1
+
+
+def test_create_destroy_close_and_context_manager(sample_dir: str) -> None:
     finder = FileFinder(sample_dir, watch=False, enable_content_indexing=False)
     assert finder.wait_for_scan(timeout_ms=5000)
     assert finder.get_base_path() is not None
@@ -65,6 +73,39 @@ def test_create_destroy_and_context_manager(sample_dir: str) -> None:
 
     with pytest.raises(FFFException, match="File picker not initialized"):
         ctx_finder.search("main")
+
+    fresh = FileFinder(sample_dir, watch=False, enable_content_indexing=False)
+    assert fresh.wait_for_scan(timeout_ms=5000)
+    fresh.close()
+    with pytest.raises(FFFException, match="File picker not initialized"):
+        fresh.search("main")
+
+
+def test_reprs(sample_dir: str) -> None:
+    with FileFinder(sample_dir, watch=False, enable_content_indexing=False) as finder:
+        assert finder.wait_for_scan(timeout_ms=5000)
+        result = finder.search("main")
+        assert repr(result).startswith("SearchResult(")
+        assert repr(result.items[0]).startswith("FileItem(")
+        assert repr(result.scores[0]).startswith("Score(")
+
+        grep_result = finder.grep("needle")
+        assert repr(grep_result).startswith("GrepResult(")
+        assert repr(grep_result.items[0]).startswith("GrepMatch(")
+        assert repr(grep_result.items[0].match_ranges[0]).startswith("MatchRange(")
+
+        dir_result = finder.directory_search("src")
+        assert repr(dir_result).startswith("DirSearchResult(")
+        assert repr(dir_result.items[0]).startswith("DirItem(")
+
+        mixed = finder.mixed_search("src", page_size=10)
+        assert repr(mixed).startswith("MixedSearchResult(")
+
+        cursor = GrepCursor(42)
+        assert repr(cursor) == "GrepCursor(offset=42)"
+
+        progress = finder.get_scan_progress()
+        assert repr(progress).startswith("ScanProgress(")
 
 
 def test_file_search_scores_and_pagination(sample_dir: str) -> None:
@@ -145,6 +186,15 @@ def test_grep_plain_regex_fuzzy_and_context(sample_dir: str) -> None:
         assert invalid.regex_fallback_error is not None
 
 
+def test_grep_invalid_mode_raises(sample_dir: str) -> None:
+    with FileFinder(sample_dir, watch=False, enable_content_indexing=True) as finder:
+        assert finder.wait_for_scan(timeout_ms=5000)
+        with pytest.raises(FFFException, match="invalid grep mode"):
+            finder.grep("needle", mode="typo")
+        with pytest.raises(FFFException, match="invalid grep mode"):
+            finder.multi_grep(["needle"], mode="typo")
+
+
 def test_grep_cursor_paginates_by_file(sample_dir: str) -> None:
     with FileFinder(sample_dir, watch=False, enable_content_indexing=True) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
@@ -152,6 +202,9 @@ def test_grep_cursor_paginates_by_file(sample_dir: str) -> None:
         first = finder.grep("def", page_limit=1)
         assert first.total_matched >= 1
         assert first.next_file_offset > 0
+        assert first.has_more is True
+        assert first.next_cursor() is not None
+        assert first.next_cursor().offset == first.next_file_offset
 
         second = finder.grep("def", cursor=GrepCursor(first.next_file_offset), page_limit=1)
         assert second.total_matched >= 1
@@ -159,6 +212,10 @@ def test_grep_cursor_paginates_by_file(sample_dir: str) -> None:
         first_paths = {rel(m.relative_path) for m in first.items}
         second_paths = {rel(m.relative_path) for m in second.items}
         assert first_paths.isdisjoint(second_paths)
+
+        exhausted = finder.grep("nonexistent_xyz")
+        assert exhausted.has_more is False
+        assert exhausted.next_cursor() is None
 
 
 def test_multi_grep_and_error_handling(sample_dir: str) -> None:
@@ -226,3 +283,8 @@ def test_reindex_and_health_check(sample_dir: str, tmp_path: Path) -> None:
         result = finder.search("other")
         assert result.total_matched == 1
         assert rel(result.items[0].relative_path) == "other.py"
+
+        finder.reindex(Path(other))
+        assert finder.wait_for_scan(timeout_ms=5000)
+        result2 = finder.search("other")
+        assert result2.total_matched == 1
