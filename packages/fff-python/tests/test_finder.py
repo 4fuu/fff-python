@@ -59,6 +59,30 @@ def test_pathlib_base_path(sample_dir: str) -> None:
         assert result.total_matched >= 1
 
 
+def test_keyword_only_options_and_cursor_constructor(sample_dir: str) -> None:
+    with pytest.raises(TypeError):
+        GrepCursor()
+
+    with pytest.raises(TypeError):
+        FileFinder(Path(sample_dir), None)
+
+    with FileFinder(Path(sample_dir), watch=False, enable_content_indexing=True) as finder:
+        assert finder.wait_for_scan(timeout_ms=5000)
+
+        with pytest.raises(TypeError):
+            finder.search("main", None)
+        with pytest.raises(TypeError):
+            finder.glob("*.py", None)
+        with pytest.raises(TypeError):
+            finder.directory_search("src", None)
+        with pytest.raises(TypeError):
+            finder.mixed_search("src", None)
+        with pytest.raises(TypeError):
+            finder.grep("needle", "plain")
+        with pytest.raises(TypeError):
+            finder.multi_grep(["needle"], None)
+
+
 def test_create_destroy_close_and_context_manager(sample_dir: str) -> None:
     finder = FileFinder(sample_dir, watch=False, enable_content_indexing=False)
     assert finder.wait_for_scan(timeout_ms=5000)

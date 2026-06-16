@@ -47,6 +47,7 @@ impl FileFinder {
     #[new]
     #[pyo3(signature = (
         base_path,
+        *,
         frecency_db_path=None,
         history_db_path=None,
         enable_mmap_cache=true,
@@ -172,6 +173,7 @@ impl FileFinder {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         query,
+        *,
         current_file=None,
         max_threads=0,
         page_index=0,
@@ -249,6 +251,7 @@ impl FileFinder {
 
     #[pyo3(signature = (
         pattern,
+        *,
         current_file=None,
         max_threads=0,
         page_index=0,
@@ -317,6 +320,7 @@ impl FileFinder {
 
     #[pyo3(signature = (
         query,
+        *,
         current_file=None,
         max_threads=0,
         page_index=0,
@@ -388,6 +392,7 @@ impl FileFinder {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         query,
+        *,
         current_file=None,
         max_threads=0,
         page_index=0,
@@ -483,6 +488,7 @@ impl FileFinder {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         query,
+        *,
         mode="plain",
         max_file_size=0,
         max_matches_per_file=0,
@@ -589,6 +595,7 @@ impl FileFinder {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         patterns,
+        *,
         constraints=None,
         mode="plain",
         max_file_size=0,

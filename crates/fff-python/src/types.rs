@@ -324,11 +324,11 @@ impl GrepResult {
         self.next_file_offset > 0
     }
 
-    fn next_cursor(&self, py: Python<'_>) -> Option<Py<GrepCursor>> {
+    fn next_cursor(&self, py: Python<'_>) -> PyResult<Option<Py<GrepCursor>>> {
         if self.next_file_offset > 0 {
-            Py::new(py, GrepCursor::new(self.next_file_offset)).ok()
+            Ok(Some(Py::new(py, GrepCursor::new(self.next_file_offset))?))
         } else {
-            None
+            Ok(None)
         }
     }
 }

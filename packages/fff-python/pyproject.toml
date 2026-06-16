@@ -26,6 +26,7 @@ build-backend = "maturin"
 manifest-path = "../../crates/fff-python/Cargo.toml"
 module-name = "fff._fff_python"
 python-source = "src"
+exclude = ["src/**/__pycache__/*", "src/**/*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
