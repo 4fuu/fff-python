@@ -351,6 +351,14 @@ pub struct GrepCursor {
     pub offset: u32,
 }
 
+#[pymethods]
+impl GrepCursor {
+    #[new]
+    fn new(offset: u32) -> Self {
+        Self { offset }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FileFinder
 // ---------------------------------------------------------------------------

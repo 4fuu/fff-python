@@ -10,6 +10,7 @@ from fff._fff_python import (
     FileItem,
     GrepMatch,
     GrepResult,
+    GrepCursor,
     MatchRange,
     MixedDirItem,
     MixedFileItem,
@@ -35,6 +36,7 @@ __all__ = [
     "MatchRange",
     "GrepMatch",
     "GrepResult",
+    "GrepCursor",
     "ScanProgress",
     "__version__",
 ]
