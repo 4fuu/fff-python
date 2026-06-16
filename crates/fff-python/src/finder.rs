@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fff::file_picker::FilePicker;
@@ -18,6 +18,117 @@ use crate::types::{
 };
 use crate::{parse_grep_mode, py_err};
 
+const DEFAULT_SEARCH_PAGE_SIZE: usize = 100;
+
+fn defaulted_usize(value: u32, default: usize) -> usize {
+    if value == 0 { default } else { value as usize }
+}
+
+fn defaulted_u64(value: u64, default: u64) -> u64 {
+    if value == 0 { default } else { value }
+}
+
+fn create_parent_dir(path: &Path) -> PyResult<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(py_err)?;
+    }
+    Ok(())
+}
+
+fn pagination_args(page_index: u32, page_size: u32) -> PaginationArgs {
+    PaginationArgs {
+        offset: page_index as usize,
+        limit: defaulted_usize(page_size, DEFAULT_SEARCH_PAGE_SIZE),
+    }
+}
+
+fn fuzzy_options<'a>(
+    max_threads: u32,
+    current_file: Option<&'a str>,
+    project_path: &'a Path,
+    page_index: u32,
+    page_size: u32,
+    combo_boost_score_multiplier: i32,
+    min_combo_count: u32,
+) -> FuzzySearchOptions<'a> {
+    FuzzySearchOptions {
+        max_threads: max_threads as usize,
+        current_file,
+        project_path: Some(project_path),
+        combo_boost_score_multiplier,
+        min_combo_count,
+        pagination: pagination_args(page_index, page_size),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grep_options(
+    mode: fff::GrepMode,
+    cursor_offset: usize,
+    max_file_size: u64,
+    max_matches_per_file: u32,
+    smart_case: bool,
+    page_limit: u32,
+    time_budget_ms: u64,
+    before_context: u32,
+    after_context: u32,
+    classify_definitions: bool,
+) -> GrepSearchOptions {
+    let defaults = GrepSearchOptions::default();
+    GrepSearchOptions {
+        max_file_size: defaulted_u64(max_file_size, defaults.max_file_size),
+        max_matches_per_file: max_matches_per_file as usize,
+        smart_case,
+        file_offset: cursor_offset,
+        page_limit: defaulted_usize(page_limit, defaults.page_limit),
+        mode,
+        time_budget_ms,
+        before_context: before_context as usize,
+        after_context: after_context as usize,
+        classify_definitions,
+        trim_whitespace: false,
+        abort_signal: None,
+    }
+}
+
+fn convert_scores(scores: &[fff::Score]) -> Vec<Score> {
+    scores.iter().map(Score::from).collect()
+}
+
+fn convert_grep_result(result: fff::grep::GrepResult<'_>, picker: &FilePicker) -> GrepResult {
+    let items = result
+        .matches
+        .iter()
+        .map(|m| GrepMatch::from_core(m, result.files[m.file_index], picker))
+        .collect();
+
+    GrepResult {
+        items,
+        total_matched: result.matches.len() as u32,
+        total_files_searched: result.total_files_searched as u32,
+        total_files: result.total_files as u32,
+        filtered_file_count: result.filtered_file_count as u32,
+        next_file_offset: result.next_file_offset as u32,
+        regex_fallback_error: result.regex_fallback_error,
+    }
+}
+
+fn clear_shared_state(
+    picker: &SharedFilePicker,
+    frecency: &SharedFrecency,
+    query_tracker: &SharedQueryTracker,
+) {
+    if let Ok(mut guard) = picker.write() {
+        guard.take();
+    }
+    if let Ok(mut guard) = frecency.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = query_tracker.write() {
+        *guard = None;
+    }
+}
+
 #[pyclass]
 pub struct FileFinder {
     picker: SharedFilePicker,
@@ -30,15 +141,7 @@ pub struct FileFinder {
 
 impl Drop for FileFinder {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.picker.write() {
-            guard.take();
-        }
-        if let Ok(mut guard) = self.frecency.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.query_tracker.write() {
-            *guard = None;
-        }
+        clear_shared_state(&self.picker, &self.frecency, &self.query_tracker);
     }
 }
 
@@ -64,14 +167,15 @@ impl FileFinder {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         base_path: PathBuf,
-        frecency_db_path: Option<String>,
-        history_db_path: Option<String>,
+        frecency_db_path: Option<PathBuf>,
+        history_db_path: Option<PathBuf>,
         enable_mmap_cache: bool,
         enable_content_indexing: bool,
         watch: bool,
         ai_mode: bool,
-        log_file_path: Option<String>,
+        log_file_path: Option<PathBuf>,
         log_level: Option<String>,
         cache_budget_max_files: u64,
         cache_budget_max_bytes: u64,
@@ -82,64 +186,64 @@ impl FileFinder {
         let shared_picker = SharedFilePicker::default();
         let shared_frecency = SharedFrecency::default();
         let query_tracker = SharedQueryTracker::default();
+        let cache_budget_max_files = cache_budget_max_files as usize;
 
-        if let Some(path) = frecency_db_path {
-            let parent = PathBuf::from(&path).parent().map(PathBuf::from);
-            if let Some(p) = parent {
-                let _ = std::fs::create_dir_all(p);
+        let init_picker = shared_picker.clone();
+        let init_frecency = shared_frecency.clone();
+        let init_query_tracker = query_tracker.clone();
+
+        py.allow_threads(move || -> PyResult<()> {
+            if let Some(path) = frecency_db_path {
+                create_parent_dir(&path)?;
+                let tracker = FrecencyTracker::open(&path).map_err(py_err)?;
+                init_frecency.init(tracker).map_err(py_err)?;
             }
-            let tracker = FrecencyTracker::open(&path).map_err(py_err)?;
-            shared_frecency.init(tracker).map_err(py_err)?;
-        }
 
-        if let Some(path) = history_db_path {
-            let parent = PathBuf::from(&path).parent().map(PathBuf::from);
-            if let Some(p) = parent {
-                let _ = std::fs::create_dir_all(p);
+            if let Some(path) = history_db_path {
+                create_parent_dir(&path)?;
+                let tracker = QueryTracker::open(&path).map_err(py_err)?;
+                init_query_tracker.init(tracker).map_err(py_err)?;
             }
-            let tracker = QueryTracker::open(&path).map_err(py_err)?;
-            query_tracker.init(tracker).map_err(py_err)?;
-        }
 
-        if let Some(path) = log_file_path {
-            let level = log_level.as_deref();
-            fff::log::init_tracing(&path, level, None).map_err(py_err)?;
-        }
+            if let Some(path) = log_file_path {
+                create_parent_dir(&path)?;
+                let path = path.to_string_lossy();
+                fff::log::init_tracing(&path, log_level.as_deref(), None).map_err(py_err)?;
+            }
 
-        let mode = if ai_mode {
-            FFFMode::Ai
-        } else {
-            FFFMode::Neovim
-        };
+            let mode = if ai_mode {
+                FFFMode::Ai
+            } else {
+                FFFMode::Neovim
+            };
 
-        let cache_budget = fff::ContentCacheBudget::from_overrides(
-            cache_budget_max_files as usize,
-            cache_budget_max_bytes,
-            cache_budget_max_file_size,
-        );
-
-        FilePicker::new_with_shared_state(
-            shared_picker.clone(),
-            shared_frecency.clone(),
-            FilePickerOptions {
-                base_path: base_path.to_string_lossy().to_string(),
-                enable_mmap_cache,
-                enable_content_indexing,
-                watch,
-                mode,
-                cache_budget,
-                follow_symlinks: false,
-                enable_fs_root_scanning,
-                enable_home_dir_scanning,
-            },
-        )
-        .map_err(py_err)?;
+            FilePicker::new_with_shared_state(
+                init_picker,
+                init_frecency,
+                FilePickerOptions {
+                    base_path: base_path.to_string_lossy().to_string(),
+                    enable_mmap_cache,
+                    enable_content_indexing,
+                    watch,
+                    mode,
+                    cache_budget: fff::ContentCacheBudget::from_overrides(
+                        cache_budget_max_files,
+                        cache_budget_max_bytes,
+                        cache_budget_max_file_size,
+                    ),
+                    follow_symlinks: false,
+                    enable_fs_root_scanning,
+                    enable_home_dir_scanning,
+                },
+            )
+            .map_err(py_err)
+        })?;
 
         Ok(Self {
             picker: shared_picker,
             frecency: shared_frecency,
             query_tracker,
-            cache_budget_max_files: cache_budget_max_files as usize,
+            cache_budget_max_files,
             cache_budget_max_bytes,
             cache_budget_max_file_size,
         })
@@ -150,24 +254,52 @@ impl FileFinder {
     }
 
     fn __exit__(&mut self, _exc_type: PyObject, _exc_value: PyObject, _traceback: PyObject) {
-        let _ = self.destroy();
-    }
-
-    fn destroy(&mut self) -> PyResult<()> {
-        if let Ok(mut guard) = self.picker.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.frecency.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.query_tracker.write() {
-            *guard = None;
-        }
-        Ok(())
+        let _ = self.close();
     }
 
     fn close(&mut self) -> PyResult<()> {
-        self.destroy()
+        clear_shared_state(&self.picker, &self.frecency, &self.query_tracker);
+        Ok(())
+    }
+
+    #[getter]
+    fn closed(&self) -> PyResult<bool> {
+        Ok(self.picker.read().map_err(py_err)?.is_none())
+    }
+
+    #[getter]
+    fn base_path(&self) -> PyResult<Option<String>> {
+        let guard = self.picker.read().map_err(py_err)?;
+        Ok(guard
+            .as_ref()
+            .map(|p| p.base_path().to_string_lossy().to_string()))
+    }
+
+    #[getter]
+    fn scan_progress(&self) -> PyResult<ScanProgress> {
+        let guard = self.picker.read().map_err(py_err)?;
+        let picker = guard
+            .as_ref()
+            .ok_or_else(|| py_err("File picker not initialized"))?;
+        let p = picker.get_scan_progress();
+        Ok(ScanProgress {
+            scanned_files_count: p.scanned_files_count as u64,
+            is_scanning: p.is_scanning,
+            is_watcher_ready: p.is_watcher_ready,
+            is_warmup_complete: p.is_warmup_complete,
+        })
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        let guard = self.picker.read().map_err(py_err)?;
+        if let Some(ref picker) = *guard {
+            Ok(format!(
+                "FileFinder(base_path={:?}, closed=False)",
+                picker.base_path().to_string_lossy()
+            ))
+        } else {
+            Ok("FileFinder(closed=True)".to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -196,56 +328,38 @@ impl FileFinder {
         let query_tracker = self.query_tracker.clone();
         let query = query.to_string();
 
-        let (items, scores, total_matched, total_files) =
-            py.allow_threads(move || -> PyResult<_> {
-                let picker_guard = picker.read().map_err(py_err)?;
-                let picker = picker_guard
-                    .as_ref()
-                    .ok_or_else(|| py_err("File picker not initialized"))?;
-                let qt_guard = query_tracker.read().map_err(py_err)?;
+        py.allow_threads(move || -> PyResult<_> {
+            let picker_guard = picker.read().map_err(py_err)?;
+            let picker = picker_guard
+                .as_ref()
+                .ok_or_else(|| py_err("File picker not initialized"))?;
+            let qt_guard = query_tracker.read().map_err(py_err)?;
 
-                let parser = QueryParser::default();
-                let parsed = parser.parse(&query);
-                let result = picker.fuzzy_search(
-                    &parsed,
-                    qt_guard.as_ref(),
-                    FuzzySearchOptions {
-                        max_threads: max_threads as usize,
-                        current_file: current_file.as_deref(),
-                        project_path: Some(picker.base_path()),
-                        combo_boost_score_multiplier,
-                        min_combo_count,
-                        pagination: PaginationArgs {
-                            offset: page_index as usize,
-                            limit: if page_size == 0 {
-                                100
-                            } else {
-                                page_size as usize
-                            },
-                        },
-                    },
-                );
+            let parsed = QueryParser::default().parse(&query);
+            let result = picker.fuzzy_search(
+                &parsed,
+                qt_guard.as_ref(),
+                fuzzy_options(
+                    max_threads,
+                    current_file.as_deref(),
+                    picker.base_path(),
+                    page_index,
+                    page_size,
+                    combo_boost_score_multiplier,
+                    min_combo_count,
+                ),
+            );
 
-                let items: Vec<FileItem> = result
+            Ok(SearchResult {
+                items: result
                     .items
                     .iter()
                     .map(|i| FileItem::from_core(i, picker))
-                    .collect();
-                let scores: Vec<Score> = result.scores.iter().map(Score::from).collect();
-
-                Ok((
-                    items,
-                    scores,
-                    result.total_matched as u32,
-                    result.total_files as u32,
-                ))
-            })?;
-
-        Ok(SearchResult {
-            items,
-            scores,
-            total_matched,
-            total_files,
+                    .collect(),
+                scores: convert_scores(&result.scores),
+                total_matched: result.total_matched as u32,
+                total_files: result.total_files as u32,
+            })
         })
     }
 
@@ -269,52 +383,35 @@ impl FileFinder {
         let picker = self.picker.clone();
         let pattern = pattern.to_string();
 
-        let (items, scores, total_matched, total_files) =
-            py.allow_threads(move || -> PyResult<_> {
-                let picker_guard = picker.read().map_err(py_err)?;
-                let picker = picker_guard
-                    .as_ref()
-                    .ok_or_else(|| py_err("File picker not initialized"))?;
+        py.allow_threads(move || -> PyResult<_> {
+            let picker_guard = picker.read().map_err(py_err)?;
+            let picker = picker_guard
+                .as_ref()
+                .ok_or_else(|| py_err("File picker not initialized"))?;
 
-                let result = picker.glob(
-                    &pattern,
-                    FuzzySearchOptions {
-                        max_threads: max_threads as usize,
-                        current_file: current_file.as_deref(),
-                        project_path: Some(picker.base_path()),
-                        combo_boost_score_multiplier: 0,
-                        min_combo_count: 0,
-                        pagination: PaginationArgs {
-                            offset: page_index as usize,
-                            limit: if page_size == 0 {
-                                100
-                            } else {
-                                page_size as usize
-                            },
-                        },
-                    },
-                );
+            let result = picker.glob(
+                &pattern,
+                fuzzy_options(
+                    max_threads,
+                    current_file.as_deref(),
+                    picker.base_path(),
+                    page_index,
+                    page_size,
+                    0,
+                    0,
+                ),
+            );
 
-                let items: Vec<FileItem> = result
+            Ok(SearchResult {
+                items: result
                     .items
                     .iter()
                     .map(|i| FileItem::from_core(i, picker))
-                    .collect();
-                let scores: Vec<Score> = result.scores.iter().map(Score::from).collect();
-
-                Ok((
-                    items,
-                    scores,
-                    result.total_matched as u32,
-                    result.total_files as u32,
-                ))
-            })?;
-
-        Ok(SearchResult {
-            items,
-            scores,
-            total_matched,
-            total_files,
+                    .collect(),
+                scores: convert_scores(&result.scores),
+                total_matched: result.total_matched as u32,
+                total_files: result.total_files as u32,
+            })
         })
     }
 
@@ -338,54 +435,36 @@ impl FileFinder {
         let picker = self.picker.clone();
         let query = query.to_string();
 
-        let (items, scores, total_matched, total_dirs) =
-            py.allow_threads(move || -> PyResult<_> {
-                let picker_guard = picker.read().map_err(py_err)?;
-                let picker = picker_guard
-                    .as_ref()
-                    .ok_or_else(|| py_err("File picker not initialized"))?;
+        py.allow_threads(move || -> PyResult<_> {
+            let picker_guard = picker.read().map_err(py_err)?;
+            let picker = picker_guard
+                .as_ref()
+                .ok_or_else(|| py_err("File picker not initialized"))?;
 
-                let parser = QueryParser::new(fff_query_parser::DirSearchConfig);
-                let parsed = parser.parse(&query);
-                let result = picker.fuzzy_search_directories(
-                    &parsed,
-                    FuzzySearchOptions {
-                        max_threads: max_threads as usize,
-                        current_file: current_file.as_deref(),
-                        project_path: Some(picker.base_path()),
-                        combo_boost_score_multiplier: 0,
-                        min_combo_count: 0,
-                        pagination: PaginationArgs {
-                            offset: page_index as usize,
-                            limit: if page_size == 0 {
-                                100
-                            } else {
-                                page_size as usize
-                            },
-                        },
-                    },
-                );
+            let parsed = QueryParser::new(fff_query_parser::DirSearchConfig).parse(&query);
+            let result = picker.fuzzy_search_directories(
+                &parsed,
+                fuzzy_options(
+                    max_threads,
+                    current_file.as_deref(),
+                    picker.base_path(),
+                    page_index,
+                    page_size,
+                    0,
+                    0,
+                ),
+            );
 
-                let items: Vec<DirItem> = result
+            Ok(DirSearchResult {
+                items: result
                     .items
                     .iter()
                     .map(|i| DirItem::from_core(i, picker))
-                    .collect();
-                let scores: Vec<Score> = result.scores.iter().map(Score::from).collect();
-
-                Ok((
-                    items,
-                    scores,
-                    result.total_matched as u32,
-                    result.total_dirs as u32,
-                ))
-            })?;
-
-        Ok(DirSearchResult {
-            items,
-            scores,
-            total_matched,
-            total_dirs,
+                    .collect(),
+                scores: convert_scores(&result.scores),
+                total_matched: result.total_matched as u32,
+                total_dirs: result.total_dirs as u32,
+            })
         })
     }
 
@@ -423,26 +502,19 @@ impl FileFinder {
                     .ok_or_else(|| py_err("File picker not initialized"))?;
                 let qt_guard = query_tracker.read().map_err(py_err)?;
 
-                let parser = QueryParser::new(fff_query_parser::MixedSearchConfig);
-                let parsed = parser.parse(&query);
+                let parsed = QueryParser::new(fff_query_parser::MixedSearchConfig).parse(&query);
                 let result = picker.fuzzy_search_mixed(
                     &parsed,
                     qt_guard.as_ref(),
-                    FuzzySearchOptions {
-                        max_threads: max_threads as usize,
-                        current_file: current_file.as_deref(),
-                        project_path: Some(picker.base_path()),
+                    fuzzy_options(
+                        max_threads,
+                        current_file.as_deref(),
+                        picker.base_path(),
+                        page_index,
+                        page_size,
                         combo_boost_score_multiplier,
                         min_combo_count,
-                        pagination: PaginationArgs {
-                            offset: page_index as usize,
-                            limit: if page_size == 0 {
-                                100
-                            } else {
-                                page_size as usize
-                            },
-                        },
-                    },
+                    ),
                 );
 
                 let items: Vec<MixedItem> = result
@@ -457,11 +529,10 @@ impl FileFinder {
                         }
                     })
                     .collect();
-                let scores: Vec<Score> = result.scores.iter().map(Score::from).collect();
 
                 Ok((
                     items,
-                    scores,
+                    convert_scores(&result.scores),
                     result.total_matched as u32,
                     result.total_files as u32,
                     result.total_dirs as u32,
@@ -518,77 +589,33 @@ impl FileFinder {
         let picker = self.picker.clone();
         let query = query.to_string();
         let mode = parse_grep_mode(mode)?;
+        let cursor_offset = cursor.map(|c| c.offset as usize).unwrap_or(0);
 
-        let (
-            items,
-            total_matched,
-            total_files_searched,
-            total_files,
-            filtered_file_count,
-            next_file_offset,
-            regex_fallback_error,
-        ) = py.allow_threads(move || -> PyResult<_> {
+        py.allow_threads(move || -> PyResult<_> {
             let picker_guard = picker.read().map_err(py_err)?;
             let picker = picker_guard
                 .as_ref()
                 .ok_or_else(|| py_err("File picker not initialized"))?;
 
-            let is_ai = picker.mode().is_ai();
-            let parsed = if is_ai {
+            let parsed = if picker.mode().is_ai() {
                 QueryParser::new(fff_query_parser::AiGrepConfig).parse(&query)
             } else {
                 fff::grep::parse_grep_query(&query)
             };
-
-            let options = GrepSearchOptions {
-                max_file_size: if max_file_size == 0 {
-                    10 * 1024 * 1024
-                } else {
-                    max_file_size
-                },
-                max_matches_per_file: max_matches_per_file as usize,
-                smart_case,
-                file_offset: cursor.map(|c| c.offset as usize).unwrap_or(0),
-                page_limit: if page_limit == 0 {
-                    50
-                } else {
-                    page_limit as usize
-                },
+            let options = grep_options(
                 mode,
+                cursor_offset,
+                max_file_size,
+                max_matches_per_file,
+                smart_case,
+                page_limit,
                 time_budget_ms,
-                before_context: before_context as usize,
-                after_context: after_context as usize,
+                before_context,
+                after_context,
                 classify_definitions,
-                trim_whitespace: false,
-                abort_signal: None,
-            };
+            );
 
-            let result = picker.grep(&parsed, &options);
-            let items: Vec<GrepMatch> = result
-                .matches
-                .iter()
-                .map(|m| GrepMatch::from_core(m, result.files[m.file_index], picker))
-                .collect();
-
-            Ok((
-                items,
-                result.matches.len() as u32,
-                result.total_files_searched as u32,
-                result.total_files as u32,
-                result.filtered_file_count as u32,
-                result.next_file_offset as u32,
-                result.regex_fallback_error,
-            ))
-        })?;
-
-        Ok(GrepResult {
-            items,
-            total_matched,
-            total_files_searched,
-            total_files,
-            filtered_file_count,
-            next_file_offset,
-            regex_fallback_error,
+            Ok(convert_grep_result(picker.grep(&parsed, &options), picker))
         })
     }
 
@@ -626,16 +653,9 @@ impl FileFinder {
     ) -> PyResult<GrepResult> {
         let picker = self.picker.clone();
         let mode = parse_grep_mode(mode)?;
+        let cursor_offset = cursor.map(|c| c.offset as usize).unwrap_or(0);
 
-        let (
-            items,
-            total_matched,
-            total_files_searched,
-            total_files,
-            filtered_file_count,
-            next_file_offset,
-            regex_fallback_error,
-        ) = py.allow_threads(move || -> PyResult<_> {
+        py.allow_threads(move || -> PyResult<_> {
             let picker_guard = picker.read().map_err(py_err)?;
             let picker = picker_guard
                 .as_ref()
@@ -646,9 +666,8 @@ impl FileFinder {
             }
             let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
 
-            let is_ai = picker.mode().is_ai();
             let parsed_constraints = constraints.as_ref().map(|c| {
-                if is_ai {
+                if picker.mode().is_ai() {
                     QueryParser::new(fff_query_parser::AiGrepConfig).parse(c)
                 } else {
                     fff::grep::parse_grep_query(c)
@@ -658,56 +677,23 @@ impl FileFinder {
                 Some(q) => &q.constraints,
                 None => &[],
             };
-
-            let options = GrepSearchOptions {
-                max_file_size: if max_file_size == 0 {
-                    10 * 1024 * 1024
-                } else {
-                    max_file_size
-                },
-                max_matches_per_file: max_matches_per_file as usize,
-                smart_case,
-                file_offset: cursor.map(|c| c.offset as usize).unwrap_or(0),
-                page_limit: if page_limit == 0 {
-                    50
-                } else {
-                    page_limit as usize
-                },
+            let options = grep_options(
                 mode,
+                cursor_offset,
+                max_file_size,
+                max_matches_per_file,
+                smart_case,
+                page_limit,
                 time_budget_ms,
-                before_context: before_context as usize,
-                after_context: after_context as usize,
+                before_context,
+                after_context,
                 classify_definitions,
-                trim_whitespace: false,
-                abort_signal: None,
-            };
+            );
 
-            let result = picker.multi_grep(&pattern_refs, constraint_refs, &options);
-            let items: Vec<GrepMatch> = result
-                .matches
-                .iter()
-                .map(|m| GrepMatch::from_core(m, result.files[m.file_index], picker))
-                .collect();
-
-            Ok((
-                items,
-                result.matches.len() as u32,
-                result.total_files_searched as u32,
-                result.total_files as u32,
-                result.filtered_file_count as u32,
-                result.next_file_offset as u32,
-                result.regex_fallback_error,
+            Ok(convert_grep_result(
+                picker.multi_grep(&pattern_refs, constraint_refs, &options),
+                picker,
             ))
-        })?;
-
-        Ok(GrepResult {
-            items,
-            total_matched,
-            total_files_searched,
-            total_files,
-            filtered_file_count,
-            next_file_offset,
-            regex_fallback_error,
         })
     }
 
@@ -722,185 +708,233 @@ impl FileFinder {
         Ok(guard.as_ref().map(|p| p.is_scan_active()).unwrap_or(false))
     }
 
-    fn wait_for_scan(&self, timeout_ms: u64) -> PyResult<bool> {
-        Ok(self.picker.wait_for_scan(Duration::from_millis(timeout_ms)))
+    fn wait_for_scan(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<bool> {
+        let picker = self.picker.clone();
+        py.allow_threads(move || Ok(picker.wait_for_scan(Duration::from_millis(timeout_ms))))
     }
 
-    fn get_scan_progress(&self) -> PyResult<ScanProgress> {
-        let guard = self.picker.read().map_err(py_err)?;
-        let picker = guard
-            .as_ref()
-            .ok_or_else(|| py_err("File picker not initialized"))?;
-        let p = picker.get_scan_progress();
-        Ok(ScanProgress {
-            scanned_files_count: p.scanned_files_count as u64,
-            is_scanning: p.is_scanning,
-            is_watcher_ready: p.is_watcher_ready,
-            is_warmup_complete: p.is_warmup_complete,
+    fn reindex(&self, py: Python<'_>, new_path: PathBuf) -> PyResult<()> {
+        let picker = self.picker.clone();
+        let frecency = self.frecency.clone();
+        let cache_budget_max_files = self.cache_budget_max_files;
+        let cache_budget_max_bytes = self.cache_budget_max_bytes;
+        let cache_budget_max_file_size = self.cache_budget_max_file_size;
+
+        py.allow_threads(move || -> PyResult<()> {
+            if !new_path.exists() {
+                return Err(py_err(format!(
+                    "Path does not exist: {}",
+                    new_path.display()
+                )));
+            }
+            let canonical = fff::path_utils::canonicalize(&new_path).map_err(py_err)?;
+
+            let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir) = {
+                let guard = picker.read().map_err(py_err)?;
+                if let Some(ref picker) = *guard {
+                    (
+                        picker.has_mmap_cache(),
+                        picker.has_content_indexing(),
+                        picker.has_watcher(),
+                        picker.mode(),
+                        picker.fs_root_scanning_enabled(),
+                        picker.home_dir_scanning_enabled(),
+                    )
+                } else {
+                    (false, true, true, FFFMode::default(), false, false)
+                }
+            };
+
+            FilePicker::new_with_shared_state(
+                picker.clone(),
+                frecency,
+                FilePickerOptions {
+                    base_path: canonical.to_string_lossy().to_string(),
+                    enable_mmap_cache: warmup_caches,
+                    enable_content_indexing: content_indexing,
+                    watch,
+                    mode,
+                    cache_budget: fff::ContentCacheBudget::from_overrides(
+                        cache_budget_max_files,
+                        cache_budget_max_bytes,
+                        cache_budget_max_file_size,
+                    ),
+                    follow_symlinks: false,
+                    enable_fs_root_scanning: fs_root,
+                    enable_home_dir_scanning: home_dir,
+                },
+            )
+            .map_err(py_err)
         })
     }
 
-    fn get_base_path(&self) -> PyResult<Option<String>> {
-        let guard = self.picker.read().map_err(py_err)?;
-        Ok(guard
-            .as_ref()
-            .map(|p| p.base_path().to_string_lossy().to_string()))
-    }
-
-    fn reindex(&self, new_path: PathBuf) -> PyResult<()> {
-        if !new_path.exists() {
-            return Err(py_err(format!(
-                "Path does not exist: {}",
-                new_path.display()
-            )));
-        }
-        let canonical = fff::path_utils::canonicalize(&new_path).map_err(py_err)?;
-
-        let (warmup_caches, content_indexing, watch, mode, fs_root, home_dir) = {
-            let guard = self.picker.write().map_err(py_err)?;
-            if let Some(ref picker) = *guard {
-                (
-                    picker.has_mmap_cache(),
-                    picker.has_content_indexing(),
-                    picker.has_watcher(),
-                    picker.mode(),
-                    picker.fs_root_scanning_enabled(),
-                    picker.home_dir_scanning_enabled(),
-                )
-            } else {
-                (false, true, true, FFFMode::default(), false, false)
-            }
-        };
-
-        FilePicker::new_with_shared_state(
-            self.picker.clone(),
-            self.frecency.clone(),
-            FilePickerOptions {
-                base_path: canonical.to_string_lossy().to_string(),
-                enable_mmap_cache: warmup_caches,
-                enable_content_indexing: content_indexing,
-                watch,
-                mode,
-                cache_budget: fff::ContentCacheBudget::from_overrides(
-                    self.cache_budget_max_files,
-                    self.cache_budget_max_bytes,
-                    self.cache_budget_max_file_size,
-                ),
-                follow_symlinks: false,
-                enable_fs_root_scanning: fs_root,
-                enable_home_dir_scanning: home_dir,
-            },
-        )
-        .map_err(py_err)
-    }
-
-    fn refresh_git_status(&self) -> PyResult<i64> {
-        self.picker
-            .refresh_git_status(&self.frecency)
-            .map_err(py_err)
-            .map(|c| c as i64)
+    fn refresh_git_status(&self, py: Python<'_>) -> PyResult<i64> {
+        let picker = self.picker.clone();
+        let frecency = self.frecency.clone();
+        py.allow_threads(move || {
+            picker
+                .refresh_git_status(&frecency)
+                .map_err(py_err)
+                .map(|c| c as i64)
+        })
     }
 
     #[pyo3(signature = (query, selected_file_path))]
-    fn track_query(&self, query: &str, selected_file_path: &str) -> PyResult<bool> {
-        let file_path = fff::path_utils::canonicalize(selected_file_path).map_err(py_err)?;
-        let project_path = {
-            let guard = self.picker.read().map_err(py_err)?;
-            guard.as_ref().map(|p| p.base_path().to_path_buf())
-        };
-        let project_path = match project_path {
-            Some(p) => p,
-            None => return Ok(false),
-        };
+    fn track_query(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        selected_file_path: PathBuf,
+    ) -> PyResult<bool> {
+        let picker = self.picker.clone();
+        let query_tracker = self.query_tracker.clone();
+        let query = query.to_string();
 
-        let mut qt_guard = self.query_tracker.write().map_err(py_err)?;
-        if let Some(ref mut tracker) = *qt_guard {
-            tracker
-                .track_query_completion(query, &project_path, &file_path)
-                .map_err(py_err)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        py.allow_threads(move || -> PyResult<bool> {
+            let file_path = fff::path_utils::canonicalize(&selected_file_path).map_err(py_err)?;
+            let project_path = {
+                let guard = picker.read().map_err(py_err)?;
+                guard.as_ref().map(|p| p.base_path().to_path_buf())
+            };
+            let project_path = match project_path {
+                Some(p) => p,
+                None => return Ok(false),
+            };
+
+            let mut qt_guard = query_tracker.write().map_err(py_err)?;
+            if let Some(ref mut tracker) = *qt_guard {
+                tracker
+                    .track_query_completion(&query, &project_path, &file_path)
+                    .map_err(py_err)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
     }
 
-    fn get_historical_query(&self, offset: u64) -> PyResult<Option<String>> {
-        let project_path = {
-            let guard = self.picker.read().map_err(py_err)?;
-            guard.as_ref().map(|p| p.base_path().to_path_buf())
-        };
-        let project_path = match project_path {
-            Some(p) => p,
-            None => return Ok(None),
-        };
+    fn get_historical_query(&self, py: Python<'_>, offset: u64) -> PyResult<Option<String>> {
+        let picker = self.picker.clone();
+        let query_tracker = self.query_tracker.clone();
 
-        let qt_guard = self.query_tracker.read().map_err(py_err)?;
-        if let Some(ref tracker) = *qt_guard {
-            tracker
-                .get_historical_query(&project_path, offset as usize)
-                .map_err(py_err)
-        } else {
-            Ok(None)
-        }
+        py.allow_threads(move || -> PyResult<Option<String>> {
+            let project_path = {
+                let guard = picker.read().map_err(py_err)?;
+                guard.as_ref().map(|p| p.base_path().to_path_buf())
+            };
+            let project_path = match project_path {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+
+            let qt_guard = query_tracker.read().map_err(py_err)?;
+            if let Some(ref tracker) = *qt_guard {
+                tracker
+                    .get_historical_query(&project_path, offset as usize)
+                    .map_err(py_err)
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     #[pyo3(signature = (test_path=None))]
     fn health_check(&self, py: Python<'_>, test_path: Option<PathBuf>) -> PyResult<Py<PyDict>> {
         let test_path = test_path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let picker = self.picker.clone();
+        let frecency = self.frecency.clone();
+        let query_tracker = self.query_tracker.clone();
+
+        let (
+            git_version,
+            repository_found,
+            workdir,
+            git_error,
+            picker_initialized,
+            picker_base_path,
+            picker_is_scanning,
+            picker_indexed_files,
+            frecency_initialized,
+            query_tracker_initialized,
+        ) = py.allow_threads(move || -> PyResult<_> {
+            let git_version = git2::Version::get();
+            let (major, minor, rev) = git_version.libgit2_version();
+            let git_version = format!("{}.{}.{}", major, minor, rev);
+            let (repository_found, workdir, git_error) =
+                match git2::Repository::discover(&test_path) {
+                    Ok(repo) => (
+                        true,
+                        repo.workdir().map(|p| p.to_string_lossy().to_string()),
+                        None,
+                    ),
+                    Err(e) => (false, None, Some(e.message().to_string())),
+                };
+
+            let (picker_initialized, picker_base_path, picker_is_scanning, picker_indexed_files) = {
+                let guard = picker.read().map_err(py_err)?;
+                if let Some(ref picker) = *guard {
+                    let progress = picker.get_scan_progress();
+                    (
+                        true,
+                        Some(picker.base_path().to_string_lossy().to_string()),
+                        Some(picker.is_scan_active()),
+                        Some(progress.scanned_files_count),
+                    )
+                } else {
+                    (false, None, None, None)
+                }
+            };
+            let frecency_initialized = frecency.read().map_err(py_err)?.is_some();
+            let query_tracker_initialized = query_tracker.read().map_err(py_err)?.is_some();
+
+            Ok((
+                git_version,
+                repository_found,
+                workdir,
+                git_error,
+                picker_initialized,
+                picker_base_path,
+                picker_is_scanning,
+                picker_indexed_files,
+                frecency_initialized,
+                query_tracker_initialized,
+            ))
+        })?;
 
         let dict = PyDict::new(py);
         dict.set_item("version", env!("CARGO_PKG_VERSION"))?;
 
         let git_info = PyDict::new(py);
-        let git_version = git2::Version::get();
-        let (major, minor, rev) = git_version.libgit2_version();
-        git_info.set_item("libgit2_version", format!("{}.{}.{}", major, minor, rev))?;
-        match git2::Repository::discover(&test_path) {
-            Ok(repo) => {
-                git_info.set_item("available", true)?;
-                git_info.set_item("repository_found", true)?;
-                if let Some(workdir) = repo.workdir() {
-                    git_info.set_item("workdir", workdir.to_string_lossy().to_string())?;
-                }
-            }
-            Err(e) => {
-                git_info.set_item("available", true)?;
-                git_info.set_item("repository_found", false)?;
-                git_info.set_item("error", e.message().to_string())?;
-            }
+        git_info.set_item("available", true)?;
+        git_info.set_item("libgit2_version", git_version)?;
+        git_info.set_item("repository_found", repository_found)?;
+        if let Some(workdir) = workdir {
+            git_info.set_item("workdir", workdir)?;
+        }
+        if let Some(error) = git_error {
+            git_info.set_item("error", error)?;
         }
         dict.set_item("git", git_info)?;
 
         let picker_info = PyDict::new(py);
-        {
-            let guard = self.picker.read().map_err(py_err)?;
-            if let Some(ref picker) = *guard {
-                picker_info.set_item("initialized", true)?;
-                picker_info.set_item(
-                    "base_path",
-                    picker.base_path().to_string_lossy().to_string(),
-                )?;
-                picker_info.set_item("is_scanning", picker.is_scan_active())?;
-                let progress = picker.get_scan_progress();
-                picker_info.set_item("indexed_files", progress.scanned_files_count)?;
-            } else {
-                picker_info.set_item("initialized", false)?;
-            }
+        picker_info.set_item("initialized", picker_initialized)?;
+        if let Some(base_path) = picker_base_path {
+            picker_info.set_item("base_path", base_path)?;
+        }
+        if let Some(is_scanning) = picker_is_scanning {
+            picker_info.set_item("is_scanning", is_scanning)?;
+        }
+        if let Some(indexed_files) = picker_indexed_files {
+            picker_info.set_item("indexed_files", indexed_files)?;
         }
         dict.set_item("file_picker", picker_info)?;
 
         let frecency_info = PyDict::new(py);
-        {
-            let guard = self.frecency.read().map_err(py_err)?;
-            frecency_info.set_item("initialized", guard.is_some())?;
-        }
+        frecency_info.set_item("initialized", frecency_initialized)?;
         dict.set_item("frecency", frecency_info)?;
 
         let query_info = PyDict::new(py);
-        {
-            let guard = self.query_tracker.read().map_err(py_err)?;
-            query_info.set_item("initialized", guard.is_some())?;
-        }
+        query_info.set_item("initialized", query_tracker_initialized)?;
         dict.set_item("query_tracker", query_info)?;
 
         Ok(dict.unbind())

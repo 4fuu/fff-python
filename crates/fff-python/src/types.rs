@@ -235,6 +235,14 @@ impl SearchResult {
             self.total_files
         )
     }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    fn __bool__(&self) -> bool {
+        !self.items.is_empty()
+    }
 }
 
 #[pyclass]
@@ -259,6 +267,14 @@ impl DirSearchResult {
             self.total_matched,
             self.total_dirs
         )
+    }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    fn __bool__(&self) -> bool {
+        !self.items.is_empty()
     }
 }
 
@@ -286,6 +302,14 @@ impl MixedSearchResult {
             self.total_files,
             self.total_dirs
         )
+    }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    fn __bool__(&self) -> bool {
+        !self.items.is_empty()
     }
 }
 
@@ -317,6 +341,14 @@ impl GrepResult {
             self.total_matched,
             self.next_file_offset
         )
+    }
+
+    fn __len__(&self) -> usize {
+        self.items.len()
+    }
+
+    fn __bool__(&self) -> bool {
+        !self.items.is_empty()
     }
 
     #[getter]

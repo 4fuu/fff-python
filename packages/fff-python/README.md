@@ -37,8 +37,11 @@ from fff import FileFinder
 
 with FileFinder("/path/to/project", watch=False) as finder:
     finder.wait_for_scan(timeout_ms=5000)
+    print(f"Indexed under {finder.base_path}")
 
     result = finder.search("main")
+    if result:
+        print(f"Showing {len(result)} of {result.total_matched} matches")
     for item, score in zip(result.items, result.scores):
         print(f"{item.relative_path}: {score.total}")
 ```

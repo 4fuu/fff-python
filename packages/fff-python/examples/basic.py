@@ -18,7 +18,7 @@ def main() -> int:
 
         print("Waiting for scan...")
         finder.wait_for_scan(timeout_ms=30000)
-        progress = finder.get_scan_progress()
+        progress = finder.scan_progress
         print(f"Indexed {progress.scanned_files_count} files")
 
         print("\nFuzzy file search for 'main':")

@@ -54,7 +54,9 @@ def test_imports_and_package_version() -> None:
 def test_pathlib_base_path(sample_dir: str) -> None:
     with FileFinder(Path(sample_dir), watch=False, enable_content_indexing=False) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
-        assert finder.get_base_path() is not None
+        assert finder.closed is False
+        assert finder.base_path is not None
+        assert finder.scan_progress.scanned_files_count >= 1
         result = finder.search("main")
         assert result.total_matched >= 1
 
@@ -83,24 +85,29 @@ def test_keyword_only_options_and_cursor_constructor(sample_dir: str) -> None:
             finder.multi_grep(["needle"], None)
 
 
-def test_create_destroy_close_and_context_manager(sample_dir: str) -> None:
+def test_close_and_context_manager(sample_dir: str) -> None:
     finder = FileFinder(sample_dir, watch=False, enable_content_indexing=False)
     assert finder.wait_for_scan(timeout_ms=5000)
-    assert finder.get_base_path() is not None
-    finder.destroy()
+    assert finder.closed is False
+    assert finder.base_path is not None
+    finder.close()
+    assert finder.closed is True
 
     with pytest.raises(FFFException, match="File picker not initialized"):
         finder.search("main")
 
     with FileFinder(sample_dir, watch=False, enable_content_indexing=False) as ctx_finder:
         assert ctx_finder.wait_for_scan(timeout_ms=5000)
+        assert ctx_finder.closed is False
 
+    assert ctx_finder.closed is True
     with pytest.raises(FFFException, match="File picker not initialized"):
         ctx_finder.search("main")
 
     fresh = FileFinder(sample_dir, watch=False, enable_content_indexing=False)
     assert fresh.wait_for_scan(timeout_ms=5000)
     fresh.close()
+    assert fresh.closed is True
     with pytest.raises(FFFException, match="File picker not initialized"):
         fresh.search("main")
 
@@ -108,6 +115,7 @@ def test_create_destroy_close_and_context_manager(sample_dir: str) -> None:
 def test_reprs(sample_dir: str) -> None:
     with FileFinder(sample_dir, watch=False, enable_content_indexing=False) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
+        assert repr(finder).startswith("FileFinder(")
         result = finder.search("main")
         assert repr(result).startswith("SearchResult(")
         assert repr(result.items[0]).startswith("FileItem(")
@@ -128,7 +136,7 @@ def test_reprs(sample_dir: str) -> None:
         cursor = GrepCursor(42)
         assert repr(cursor) == "GrepCursor(offset=42)"
 
-        progress = finder.get_scan_progress()
+        progress = finder.scan_progress
         assert repr(progress).startswith("ScanProgress(")
 
 
@@ -137,7 +145,8 @@ def test_file_search_scores_and_pagination(sample_dir: str) -> None:
         assert finder.wait_for_scan(timeout_ms=5000)
         result = finder.search("main", page_size=1)
         assert result.total_matched >= 1
-        assert len(result.items) == 1
+        assert len(result) == len(result.items) == 1
+        assert bool(result) is True
         assert any("main.py" in rel(item.relative_path) for item in result.items)
 
         score = result.scores[0]
@@ -146,7 +155,11 @@ def test_file_search_scores_and_pagination(sample_dir: str) -> None:
         assert isinstance(score.match_type, str)
 
         second_page = finder.search("", page_index=1, page_size=1)
-        assert len(second_page.items) == 1
+        assert len(second_page) == len(second_page.items) == 1
+
+        empty = finder.search("definitely_no_such_file_xyz")
+        assert len(empty) == 0
+        assert bool(empty) is False
 
 
 def test_glob_variants(sample_dir: str) -> None:
@@ -173,10 +186,14 @@ def test_directory_and_mixed_search(sample_dir: str) -> None:
 
         dirs = finder.directory_search("src")
         assert dirs.total_matched >= 1
+        assert len(dirs) == len(dirs.items)
+        assert bool(dirs) is True
         assert any(rel(item.relative_path).startswith("src") for item in dirs.items)
 
         mixed = finder.mixed_search("src", page_size=10)
         assert mixed.total_matched >= 3
+        assert len(mixed) == len(mixed.items)
+        assert bool(mixed) is True
         assert any(isinstance(item, MixedDirItem) for item in mixed.items)
         assert any(isinstance(item, MixedFileItem) for item in mixed.items)
 
@@ -187,6 +204,8 @@ def test_grep_plain_regex_fuzzy_and_context(sample_dir: str) -> None:
 
         plain = finder.grep("needle", before_context=1, after_context=1)
         assert plain.total_matched == 1
+        assert len(plain) == len(plain.items) == 1
+        assert bool(plain) is True
         match = plain.items[0]
         assert rel(match.relative_path) == "docs/guide.txt"
         assert match.line_content == "needle target"
@@ -240,13 +259,15 @@ def test_grep_cursor_paginates_by_file(sample_dir: str) -> None:
         exhausted = finder.grep("nonexistent_xyz")
         assert exhausted.has_more is False
         assert exhausted.next_cursor() is None
+        assert len(exhausted) == 0
+        assert bool(exhausted) is False
 
 
 def test_multi_grep_and_error_handling(sample_dir: str) -> None:
     with FileFinder(sample_dir, watch=False, enable_content_indexing=True) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
 
-        result = finder.multi_grep(["def main", "def helper"])
+        result = finder.multi_grep(("def main", "def helper"))
         assert result.total_matched == 2
         assert {Path(rel(m.relative_path)).name for m in result.items} == {
             "main.py",
@@ -259,11 +280,11 @@ def test_multi_grep_and_error_handling(sample_dir: str) -> None:
 
 def test_query_history_persists(sample_dir: str, tmp_path: Path) -> None:
     history_db = tmp_path / "history"
-    selected_file = str(Path(sample_dir) / "src" / "main.py")
+    selected_file = Path(sample_dir) / "src" / "main.py"
 
     with FileFinder(
         sample_dir,
-        history_db_path=str(history_db),
+        history_db_path=history_db,
         watch=False,
         enable_content_indexing=False,
     ) as finder:
@@ -273,7 +294,7 @@ def test_query_history_persists(sample_dir: str, tmp_path: Path) -> None:
 
     with FileFinder(
         sample_dir,
-        history_db_path=str(history_db),
+        history_db_path=history_db,
         watch=False,
         enable_content_indexing=False,
     ) as finder:
@@ -290,14 +311,14 @@ def test_reindex_and_health_check(sample_dir: str, tmp_path: Path) -> None:
     history_db = tmp_path / "history"
     with FileFinder(
         sample_dir,
-        frecency_db_path=str(frecency_db),
-        history_db_path=str(history_db),
+        frecency_db_path=frecency_db,
+        history_db_path=history_db,
         watch=False,
         enable_content_indexing=False,
     ) as finder:
         assert finder.wait_for_scan(timeout_ms=5000)
 
-        health = finder.health_check(sample_dir)
+        health = finder.health_check(Path(sample_dir))
         assert health["file_picker"]["initialized"] is True
         assert health["frecency"]["initialized"] is True
         assert health["query_tracker"]["initialized"] is True
