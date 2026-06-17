@@ -111,7 +111,7 @@ fn convert_grep_result(result: fff::grep::GrepResult<'_>, picker: &FilePicker) -
     let items = result
         .matches
         .iter()
-        .map(|m| GrepMatch::from_core(m, result.files[m.file_index], picker))
+        .map(|m| GrepMatch::from((m, result.files[m.file_index], picker)))
         .collect();
 
     GrepResult {
@@ -366,7 +366,7 @@ impl FileFinder {
                 items: result
                     .items
                     .iter()
-                    .map(|i| FileItem::from_core(i, picker))
+                    .map(|i| FileItem::from((*i, picker)))
                     .collect(),
                 scores: convert_scores(&result.scores),
                 total_matched: result.total_matched as u32,
@@ -418,7 +418,7 @@ impl FileFinder {
                 items: result
                     .items
                     .iter()
-                    .map(|i| FileItem::from_core(i, picker))
+                    .map(|i| FileItem::from((*i, picker)))
                     .collect(),
                 scores: convert_scores(&result.scores),
                 total_matched: result.total_matched as u32,
@@ -471,7 +471,7 @@ impl FileFinder {
                 items: result
                     .items
                     .iter()
-                    .map(|i| DirItem::from_core(i, picker))
+                    .map(|i| DirItem::from((*i, picker)))
                     .collect(),
                 scores: convert_scores(&result.scores),
                 total_matched: result.total_matched as u32,
@@ -534,10 +534,10 @@ impl FileFinder {
                     .iter()
                     .map(|item| match item {
                         fff::MixedItemRef::File(file) => {
-                            MixedItem::File(MixedFileItem::from_core(file, picker))
+                            MixedItem::File(MixedFileItem::from((*file, picker)))
                         }
                         fff::MixedItemRef::Dir(dir) => {
-                            MixedItem::Dir(MixedDirItem::from_core(dir, picker))
+                            MixedItem::Dir(MixedDirItem::from((*dir, picker)))
                         }
                     })
                     .collect();

@@ -25,8 +25,8 @@ impl From<&fff::Score> for Score {
     }
 }
 
-impl FileItem {
-    pub fn from_core(item: &fff::FileItem, picker: &FilePicker) -> Self {
+impl From<(&fff::FileItem, &FilePicker)> for FileItem {
+    fn from((item, picker): (&fff::FileItem, &FilePicker)) -> Self {
         Self {
             relative_path: item.relative_path(picker),
             file_name: item.file_name(picker),
@@ -41,8 +41,8 @@ impl FileItem {
     }
 }
 
-impl DirItem {
-    pub fn from_core(item: &fff::DirItem, picker: &FilePicker) -> Self {
+impl From<(&fff::DirItem, &FilePicker)> for DirItem {
+    fn from((item, picker): (&fff::DirItem, &FilePicker)) -> Self {
         Self {
             relative_path: item.relative_path(picker),
             dir_name: item.dir_name(picker),
@@ -51,8 +51,8 @@ impl DirItem {
     }
 }
 
-impl MixedFileItem {
-    pub fn from_core(item: &fff::FileItem, picker: &FilePicker) -> Self {
+impl From<(&fff::FileItem, &FilePicker)> for MixedFileItem {
+    fn from((item, picker): (&fff::FileItem, &FilePicker)) -> Self {
         Self {
             relative_path: item.relative_path(picker),
             file_name: item.file_name(picker),
@@ -67,8 +67,8 @@ impl MixedFileItem {
     }
 }
 
-impl MixedDirItem {
-    pub fn from_core(item: &fff::DirItem, picker: &FilePicker) -> Self {
+impl From<(&fff::DirItem, &FilePicker)> for MixedDirItem {
+    fn from((item, picker): (&fff::DirItem, &FilePicker)) -> Self {
         Self {
             relative_path: item.relative_path(picker),
             dir_name: item.dir_name(picker),
@@ -77,8 +77,8 @@ impl MixedDirItem {
     }
 }
 
-impl GrepMatch {
-    pub fn from_core(m: &fff::GrepMatch, file: &fff::FileItem, picker: &FilePicker) -> Self {
+impl From<(&fff::GrepMatch, &fff::FileItem, &FilePicker)> for GrepMatch {
+    fn from((m, file, picker): (&fff::GrepMatch, &fff::FileItem, &FilePicker)) -> Self {
         Self {
             relative_path: file.relative_path(picker),
             file_name: file.file_name(picker),
